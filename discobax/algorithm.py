@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from slingpy import AbstractDataSource, AbstractBaseModel
 
-from .gp_model import GPModel
+from .gp_model import SimpleGPRegressor, SimpleGPClassifier, NeuralGPModel, BaseGPModel
 from .utils import dict_to_namespace, jaccard_similarity
 
 
@@ -182,7 +182,7 @@ class TopK(FixedPathAlgorithm):
 
 class SubsetSelect(Algorithm):
 
-    def __init__(self, X :AbstractDataSource, noise_type, n_samples=1000, k=1):
+    def __init__(self, X: AbstractDataSource, noise_type, n_samples=1000, k=1):
         """
             Initialize the SubsetSelect algorithm.
 
@@ -199,17 +199,25 @@ class SubsetSelect(Algorithm):
         self.selected_subset = []
         self.mc_samples = n_samples
         self.exe_path = dict_to_namespace({"x": [], "y": []})
+        input_dim = self.X.shape[-1]  # input_dim is the dimension of your input data
+
         if noise_type == "multiplicative":
-            self.noise_gp = GPModel(None, None, gpytorch.likelihoods.BernoulliLikelihood())
+            num_inducing_points = 10
+            inducing_points = torch.randn(num_inducing_points, input_dim)
+            self.noise_gp = SimpleGPClassifier(inducing_points)
+            self.noise_likelihood = gpytorch.likelihoods.BernoulliLikelihood()
+
         elif noise_type == "additive":
-            self.noise_gp = GPModel(None, None, gpytorch.likelihoods.GaussianLikelihood())
+            self.noise_likelihood = gpytorch.likelihoods.GaussianLikelihood()
+            self.noise_gp = SimpleGPRegressor(None, None, self.noise_likelihood)
+
         else:
             raise ValueError("noise_type must be either 'additive' or 'multiplicative'")
 
     def initialize(self):
         self.exe_path = dict_to_namespace({"x": [], "y": []})
 
-    def monte_carlo_expectation(self, S: AbstractDataSource, f: AbstractBaseModel):
+    def monte_carlo_expectation(self, S: torch.Tensor, f: NeuralGPModel):
         """
         Estimate the expectation of the maximum value using Monte Carlo sampling.
 
@@ -219,25 +227,37 @@ class SubsetSelect(Algorithm):
         """
         n_samples = self.mc_samples
         with torch.no_grad():
-            f_samples = torch.tensor(f.predict(S)[-1], dtype=torch.float32)
+            # Get the posterior for the input set S
+            posterior = f.posterior(S)
+            # Sample from the posterior
+            f_samples = posterior.sample(sample_shape=torch.Size([n_samples]))
+
             if self.noise_type == 'multiplicative':
-                eta_samples = self.noise_gp(S).rsample(sample_shape=torch.Size([n_samples]))
+                latent_samples = self.noise_gp(S).rsample(sample_shape=torch.Size([n_samples]))
+                # Using the likelihood of the noise_gp to transform latent samples into probabilities
+                eta_samples = self.noise_gp.likelihood(latent_samples).probs.squeeze(-1)
+
+                # Ensure the shapes match for multiplication
                 if f_samples.shape != eta_samples.shape:
                     f_samples = f_samples.unsqueeze(0).expand_as(eta_samples)
                 samples = f_samples * eta_samples
+
             elif self.noise_type == 'additive':
                 eta_samples = self.noise_gp(S).rsample(sample_shape=torch.Size([n_samples]))
+
                 # Ensure the shapes match for addition
                 if f_samples.shape != eta_samples.shape:
                     f_samples = f_samples.unsqueeze(0).expand_as(eta_samples)
                 samples = f_samples + eta_samples
+
             else:
                 raise ValueError("noise_type must be either 'additive' or 'multiplicative'")
+
             max_values = samples.max(dim=1)[0]
             expected_max = max_values.mean(dim=0)
         return expected_max
 
-    def select_next(self, f: AbstractBaseModel):
+    def select_next(self, f: BaseGPModel):
         """
         Select the next element for the subset based on Monte Carlo estimated scores.
 
@@ -245,11 +265,11 @@ class SubsetSelect(Algorithm):
         """
         mask = torch.tensor([x.item() not in self.selected_subset for x in self.X])
         candidates = self.X[mask]
-        scores = self.monte_carlo_expectation(candidates, f)
+        scores = self.monte_carlo_expectation(candidates, f.model)
         next_selection = candidates[torch.argmax(scores).item()]
         return next_selection
 
-    def take_step(self, f: AbstractBaseModel):
+    def take_step(self, f: BaseGPModel):
         """
         Perform one step of the subset selection process.
 
@@ -290,7 +310,7 @@ class SubsetSelect(Algorithm):
         """
         return self.selected_subset
 
-    def get_exe_paths(self, f: AbstractBaseModel):
+    def get_exe_paths(self, f: BaseGPModel):
         """
         Get the execution paths for x values and their corresponding model predictions.
         """
