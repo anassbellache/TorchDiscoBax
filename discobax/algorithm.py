@@ -17,8 +17,8 @@ import numpy as np
 import torch
 from slingpy import AbstractDataSource, AbstractBaseModel
 
-from gp_model import GPModel
-from utils import dict_to_namespace, jaccard_similarity
+from .gp_model import GPModel
+from .utils import dict_to_namespace, jaccard_similarity
 
 
 class Algorithm(ABC):

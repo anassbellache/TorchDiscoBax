@@ -265,10 +265,14 @@ class NeuralGPModel(gpytorch.models.ExactGP, botorch.models.model.FantasizeMixin
         """
         # Ensure that the new data is processed using the feature extractor
         X_projected = self.feature_extractor(X)
-        if self.train_inputs[0].dim() == 1:
-            updated_train_x = torch.cat([self.train_inputs[0], X_projected.squeeze(0)], dim=0)
+
+        # Make sure self.train_inputs[0] is the projected version
+        train_inputs_projected = self.feature_extractor(self.train_inputs[0])
+
+        if train_inputs_projected.dim() == 1:
+            updated_train_x = torch.cat([train_inputs_projected, X_projected.squeeze(0)], dim=0)
         else:
-            updated_train_x = torch.cat([self.train_inputs[0], X_projected], dim=0)
+            updated_train_x = torch.cat([train_inputs_projected, X_projected], dim=0)
 
         updated_train_y = torch.cat([self.train_targets, Y], dim=0)
 
@@ -277,17 +281,14 @@ class NeuralGPModel(gpytorch.models.ExactGP, botorch.models.model.FantasizeMixin
         new_model.likelihood = self.likelihood
         new_model.mean_module = self.mean_module
         new_model.covar_module = self.covar_module
-        new_model.feature_extractor = self.feature_extractors
+        new_model.feature_extractor = self.feature_extractor
 
         return new_model
 
     def posterior(self, X: Tensor, observation_noise: bool = False, **kwargs: Any) -> Posterior:
         # Process the input through the neural network.
-        X_projected = self.feature_extractor(X)
-        X_projected = self.scale_to_bounds(X_projected)
-
         # Obtain the prior distribution.
-        mvn = self(X_projected)
+        mvn = self(X)
 
         if observation_noise:
             if isinstance(self.likelihood, _GaussianLikelihoodBase):
@@ -308,4 +309,11 @@ class NeuralGPModel(gpytorch.models.ExactGP, botorch.models.model.FantasizeMixin
         projected_x = self.scale_to_bounds(projected_x)
         mean_x = self.mean_module(projected_x)
         covar_x = self.covar_module(projected_x)
+
+        print("mean_x shape:", mean_x.shape)
+        print("covar_x shape:", covar_x.shape)
+
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
+
+    def __call__(self, x):
+        return self.forward(x)
