@@ -10,15 +10,24 @@
 #  Scales up to large datasets
 #  Handles batches
 
-from typing import AnyStr, Optional, List, Type
+from typing import AnyStr, Optional, List, Type, Any
 
 import gpytorch
+import botorch
 import numpy as np
 import torch
 import torch.optim
+from botorch.models.model import TFantasizeMixin
+from botorch.posteriors import Posterior
+from gpytorch.distributions import MultivariateNormal
 from slingpy import AbstractBaseModel, AbstractDataSource
+from torch import Tensor
+from torch.nn import Module
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
+from gpytorch.distributions import MultitaskMultivariateNormal
+from gpytorch.likelihoods import _GaussianLikelihoodBase
+from botorch.posteriors import GPyTorchPosterior
 
 
 class BaseGPModel(AbstractBaseModel):
@@ -26,7 +35,7 @@ class BaseGPModel(AbstractBaseModel):
         super().__init__()
         self.num_samples = None
         self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
-        self.model = GPModel(None, None, self.likelihood)
+        self.model = NeuralGPModel(None, None, self.likelihood)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.1)
         self.return_samples = True
 
@@ -165,7 +174,8 @@ class BaseGPModel(AbstractBaseModel):
         torch.save(state_dict, file_path)
 
 
-class GPModel(gpytorch.models.ExactGP):
+class GPModel(gpytorch.models.ExactGP,
+              botorch.models.model.FantasizeMixin):
     """
     Plain simple GP model with RBF kernel
     """
@@ -177,6 +187,47 @@ class GPModel(gpytorch.models.ExactGP):
         self.covar_module = gpytorch.kernels.ScaleKernel(
             gpytorch.kernels.RBFKernel()
         )
+
+    def condition_on_observations(self, X: Tensor, Y: Tensor, **kwargs: Any) -> 'GPModel':
+        """
+        Condition the GP on new observations (X, Y) and return a new GPModel.
+        """
+
+        # Combine the existing training data with the new data.
+        if self.train_inputs[0].dim() == 1:
+            updated_train_x = torch.cat([self.train_inputs[0], X.squeeze(0)], dim=0)
+        else:
+            updated_train_x = torch.cat([self.train_inputs[0], X], dim=0)
+
+        updated_train_y = torch.cat([self.train_targets, Y], dim=0)
+
+        # Create a new model with the updated data.
+        new_model = self.__class__(updated_train_x, updated_train_y, self.likelihood)
+        new_model.likelihood = self.likelihood
+        new_model.mean_module = self.mean_module
+        new_model.covar_module = self.covar_module
+
+        # If your model has more components (e.g., hyperparameters, etc.), you might need to copy those over as well.
+        # Here's a basic copy:
+        # new_model.covar_module.base_kernel.lengthscale = self.covar_module.base_kernel.lengthscale
+        # ... repeat for other hyperparameters and components as necessary ...
+
+        return new_model
+
+    def posterior(self, X: Tensor, *args, observation_noise: bool = False, **kwargs: Any) -> Posterior:
+        # The ExactGP's __call__ method provides the posterior predictive distribution
+        mvn = self(X)
+        if observation_noise:
+            # If considering observation noise, add it to the predictive covariance
+            noise_diag = self.likelihood.noise_covar.noise
+            mvn = gpytorch.distributions.MultivariateNormal(
+                mvn.mean, mvn.lazy_covariance_matrix + noise_diag.diag_embed()
+            )
+        return GPyTorchPosterior(mvn)
+
+    def transform_inputs(self, X: Tensor, input_transform: Optional[Module] = None) -> Tensor:
+        # Transform the inputs if necessary, placeholder for now
+        return X
 
     def forward(self, x):
         mean_x = self.mean_module(x)
@@ -196,7 +247,7 @@ class LargeFeatureExtractor(torch.nn.Sequential):
         self.add_module('linear4', torch.nn.Linear(50, 2))
 
 
-class NeuralGPModel(gpytorch.models.ExactGP):
+class NeuralGPModel(gpytorch.models.ExactGP, botorch.models.model.FantasizeMixin):
     def __init__(self, train_x, train_y, likelihood):
         super().__init__(train_x, train_y, likelihood)
 
@@ -207,6 +258,50 @@ class NeuralGPModel(gpytorch.models.ExactGP):
         self.covar_module = gpytorch.kernels.ScaleKernel(
             gpytorch.kernels.MaternKernel(nu=2.5)
         )
+
+    def condition_on_observations(self, X: Tensor, Y: Tensor, **kwargs: Any) -> 'NeuralGPModel':
+        """
+        Condition the NeuralGP on new observations (X, Y) and return a new NeuralGPModel.
+        """
+        # Ensure that the new data is processed using the feature extractor
+        X_projected = self.feature_extractor(X)
+        if self.train_inputs[0].dim() == 1:
+            updated_train_x = torch.cat([self.train_inputs[0], X_projected.squeeze(0)], dim=0)
+        else:
+            updated_train_x = torch.cat([self.train_inputs[0], X_projected], dim=0)
+
+        updated_train_y = torch.cat([self.train_targets, Y], dim=0)
+
+        # Create a new model with the updated data.
+        new_model = self.__class__(updated_train_x, updated_train_y, self.likelihood)
+        new_model.likelihood = self.likelihood
+        new_model.mean_module = self.mean_module
+        new_model.covar_module = self.covar_module
+        new_model.feature_extractor = self.feature_extractors
+
+        return new_model
+
+    def posterior(self, X: Tensor, observation_noise: bool = False, **kwargs: Any) -> Posterior:
+        # Process the input through the neural network.
+        X_projected = self.feature_extractor(X)
+        X_projected = self.scale_to_bounds(X_projected)
+
+        # Obtain the prior distribution.
+        mvn = self(X_projected)
+
+        if observation_noise:
+            if isinstance(self.likelihood, _GaussianLikelihoodBase):
+                # Adjust the variance using the likelihood's noise.
+                noise = self.likelihood.noise
+                mvn = MultitaskMultivariateNormal(
+                    mvn.mean, mvn.lazy_covariance_matrix.add_diag(noise)
+                )
+
+        # Return the botorch wrapper around GPyTorch's posterior.
+        return GPyTorchPosterior(mvn)
+
+    def transform_inputs(self, X: Tensor, input_transform: Optional[Module] = None) -> Tensor:
+        pass
 
     def forward(self, x):
         projected_x = self.feature_extractor(x)
