@@ -17,6 +17,7 @@ import gpytorch
 import numpy as np
 import torch
 import torch.optim
+from botorch.models.model import TFantasizeMixin
 from botorch.posteriors import GPyTorchPosterior
 from botorch.posteriors import Posterior
 from gpytorch.distributions import MultitaskMultivariateNormal
@@ -38,7 +39,8 @@ class BaseGPModel(AbstractBaseModel):
         self.return_samples = True
         self.data_dim = input_x.size(-1)
 
-    def predict(self, dataset_x: AbstractDataSource, batch_size: int = 256, row_names: List[AnyStr] = None) -> List[np.ndarray]:
+    def predict(self, dataset_x: AbstractDataSource, batch_size: int = 256, row_names: List[AnyStr] = None) -> List[
+        np.ndarray]:
         # Convert dataset_x to a PyTorch tensor
         x_tensor = torch.tensor(dataset_x.get_data(), dtype=torch.float32)
 
@@ -177,19 +179,65 @@ class BaseGPModel(AbstractBaseModel):
         torch.save(state_dict, file_path)
 
 
-class SimpleGPRegressor(gpytorch.models.ExactGP):
+class SimpleGPRegressor(gpytorch.models.ExactGP, botorch.models.model.FantasizeMixin):
     def __init__(self, train_x, train_y, likelihood):
         super(SimpleGPRegressor, self).__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ConstantMean()
         self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
+
+    def posterior(self, X: Tensor, observation_noise: bool = False, **kwargs: Any) -> Posterior:
+        # Process the input through the neural network.
+        # Obtain the prior distribution.
+        mvn = self(X)
+
+        if observation_noise:
+            if isinstance(self.likelihood, _GaussianLikelihoodBase):
+                # Adjust the variance using the likelihood's noise.
+                noise = self.likelihood.noise
+                mvn = MultitaskMultivariateNormal(
+                    mvn.mean, mvn.lazy_covariance_matrix.add_diag(noise)
+                )
+
+        # Return the botorch wrapper around GPyTorch's posterior.
+        return GPyTorchPosterior(mvn)
+
+    def condition_on_observations(self: TFantasizeMixin, X: Tensor, Y: Tensor, **kwargs: Any) -> TFantasizeMixin:
+        """
+                Condition the NeuralGP on new observations (X, Y) and return a new NeuralGPModel.
+                """
+        # Ensure that the new data is processed using the feature extractor
+
+        # Make sure self.train_inputs[0] is the projected version
+        train_inputs_projected = self.train_inputs[0]
+
+        if train_inputs_projected.dim == 1:
+            updated_train_x = torch.cat([train_inputs_projected, X.squeeze(0)], dim=0)
+        else:
+            updated_train_x = torch.cat([train_inputs_projected, X], dim=0)
+
+        updated_train_y = torch.cat([self.train_targets, Y], dim=0)
+
+        # Create a new model with the updated data.
+        new_model = self.__class__(updated_train_x, updated_train_y, self.likelihood)
+        new_model.likelihood = self.likelihood
+        new_model.mean_module = self.mean_module
+        new_model.covar_module = self.covar_module
+
+        return new_model
+
+    def transform_inputs(self, X: Tensor, input_transform: Optional[Module] = None) -> Tensor:
+        pass
 
     def forward(self, x):
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
+    def __call__(self, x):
+        return self.forward(x)
 
-class SimpleGPClassifier(gpytorch.models.ApproximateGP):
+
+class SimpleGPClassifier(gpytorch.models.ApproximateGP, botorch.models.model.FantasizeMixin):
     def __init__(self, inducing_points):
         variational_distribution = gpytorch.variational.CholeskyVariationalDistribution(inducing_points.size(0))
         variational_strategy = gpytorch.variational.VariationalStrategy(self, inducing_points, variational_distribution)
@@ -199,11 +247,58 @@ class SimpleGPClassifier(gpytorch.models.ApproximateGP):
         self.mean_module = gpytorch.means.ConstantMean()
         self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
 
+    def condition_on_observations(self: TFantasizeMixin, X: Tensor, Y: Tensor, **kwargs: Any) -> TFantasizeMixin:
+        """
+                Condition the NeuralGP on new observations (X, Y) and return a new NeuralGPModel.
+                """
+        # Ensure that the new data is processed using the feature extractor
+        X_projected = self.feature_extractor(X)
+
+        # Make sure self.train_inputs[0] is the projected version
+        train_inputs_projected = self.feature_extractor(self.train_inputs[0])
+
+        if train_inputs_projected.dim() == 1:
+            updated_train_x = torch.cat([train_inputs_projected, X_projected.squeeze(0)], dim=0)
+        else:
+            updated_train_x = torch.cat([train_inputs_projected, X_projected], dim=0)
+
+        updated_train_y = torch.cat([self.train_targets, Y], dim=0)
+
+        # Create a new model with the updated data.
+        new_model = self.__class__(updated_train_x, updated_train_y, self.likelihood)
+        new_model.likelihood = self.likelihood
+        new_model.mean_module = self.mean_module
+        new_model.covar_module = self.covar_module
+
+        return new_model
+
+    def posterior(self, X: Tensor, observation_noise: bool = False, **kwargs: Any) -> Posterior:
+        # Process the input through the neural network.
+        # Obtain the prior distribution.
+        mvn = self(X)
+
+        if observation_noise:
+            if isinstance(self.likelihood, _GaussianLikelihoodBase):
+                # Adjust the variance using the likelihood's noise.
+                noise = self.likelihood.noise
+                mvn = MultitaskMultivariateNormal(
+                    mvn.mean, mvn.lazy_covariance_matrix.add_diag(noise)
+                )
+
+        # Return the botorch wrapper around GPyTorch's posterior.
+        return GPyTorchPosterior(mvn)
+
+    def transform_inputs(self, X: Tensor, input_transform: Optional[Module] = None) -> Tensor:
+        pass
+
     def forward(self, x):
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
         latent_pred = gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
         return latent_pred
+
+    def __call__(self, x, **kwargs):
+        return self.forward(x)
 
 
 class LargeFeatureExtractor(torch.nn.Sequential):

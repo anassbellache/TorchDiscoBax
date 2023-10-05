@@ -77,7 +77,6 @@ class FixedPathAlgorithm(Algorithm):
     """
     Algorithm with a fixed execution path input sequence, specified by x_path parameter.
     """
-
     def __init__(self, params):
         super().__init__(params)
         self.params.name = getattr(params, "[[][]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]name",
@@ -105,7 +104,6 @@ class TopK(FixedPathAlgorithm):
     Algorithm that scans over a set of points, and as output returns the K points with
     highest value.
     """
-
     def __init__(self, params):
         """Set self.params, the parameters for the algorithm."""
         super().__init__(params)
@@ -225,6 +223,7 @@ class SubsetSelect(Algorithm):
         :param S: Set of candidate points.
         :return: Expected max value across the sampled functions for each candidate point.
         """
+        f.eval()
         n_samples = self.mc_samples
         with torch.no_grad():
             # Get the posterior for the input set S
