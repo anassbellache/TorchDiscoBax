@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from argparse import Namespace
 
 import gpytorch.likelihoods
+from botorch.sampling import SobolQMCNormalSampler
 import numpy as np
 import torch
 from slingpy import AbstractDataSource, AbstractBaseModel
@@ -193,7 +194,7 @@ class SubsetSelect(Algorithm):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.noise_type = noise_type
         self.k = k
-        self.X = torch.tensor(X.get_data(), device=device)
+        self.X = torch.tensor(X.get_data(), device=device, dtype=torch.float32)
         self.selected_subset = []
         self.mc_samples = n_samples
         self.exe_path = dict_to_namespace({"x": [], "y": []})
@@ -224,25 +225,29 @@ class SubsetSelect(Algorithm):
         :return: Expected max value across the sampled functions for each candidate point.
         """
         f.eval()
-        n_samples = self.mc_samples
+        sampler = SobolQMCNormalSampler(sample_shape=torch.Size([self.mc_samples]))  # Initialize the Sobol sampler
+
         with torch.no_grad():
             # Get the posterior for the input set S
             posterior = f.posterior(S)
-            # Sample from the posterior
-            f_samples = posterior.sample(sample_shape=torch.Size([n_samples]))
+            # Sample from the posterior using SobolQMCNormalSampler
+            f_samples = sampler(posterior)
 
             if self.noise_type == 'multiplicative':
-                latent_samples = self.noise_gp(S).rsample(sample_shape=torch.Size([n_samples]))
+                latent_samples = self.noise_gp(S).rsample(sample_shape=torch.Size([self.mc_samples]))
                 # Using the likelihood of the noise_gp to transform latent samples into probabilities
                 eta_samples = self.noise_gp.likelihood(latent_samples).probs.squeeze(-1)
 
                 # Ensure the shapes match for multiplication
                 if f_samples.shape != eta_samples.shape:
-                    f_samples = f_samples.unsqueeze(0).expand_as(eta_samples)
+                    f_samples = f_samples.squeeze(-1)
+                    f_samples = f_samples.expand_as(eta_samples)
                 samples = f_samples * eta_samples
 
             elif self.noise_type == 'additive':
-                eta_samples = self.noise_gp(S).rsample(sample_shape=torch.Size([n_samples]))
+                noise_posterior = self.noise_gp.posterior(S)
+                # Sample from the noise_posterior using SobolQMCNormalSampler
+                eta_samples = sampler(noise_posterior)
 
                 # Ensure the shapes match for addition
                 if f_samples.shape != eta_samples.shape:
@@ -262,10 +267,16 @@ class SubsetSelect(Algorithm):
 
         :return: Point from X that is estimated to maximize the expectation.
         """
-        mask = torch.tensor([x.item() not in self.selected_subset for x in self.X])
-        candidates = self.X[mask]
-        scores = self.monte_carlo_expectation(candidates, f.model)
-        next_selection = candidates[torch.argmax(scores).item()]
+        mask = torch.tensor(
+            [not any(torch.allclose(x.float(), torch.tensor(selected).float()) for selected in self.selected_subset) for
+             x in self.X],
+            dtype=torch.bool
+        )
+        candidates_from_mask = self.X[mask]
+        concatenated_candidates = torch.cat([torch.tensor(x).float().unsqueeze(0) for x in self.selected_subset] + [candidates_from_mask], dim=0).float()
+
+        scores = self.monte_carlo_expectation(concatenated_candidates, f.model)
+        next_selection = concatenated_candidates[torch.argmax(scores).item()]
         return next_selection
 
     def take_step(self, f: BaseGPModel):
@@ -284,13 +295,13 @@ class SubsetSelect(Algorithm):
             self.selected_subset.append(next_x)
 
             # Get the prediction using the predict method
-            y_pred = f.predict(next_x)
+            y_pred = f.model(next_x)
 
             # If y_pred is a list (mean, std, margins), then take the mean.
             # If it's already a scalar, then it remains unchanged.
             y = y_pred[0] if isinstance(y_pred, list) else y_pred
-
-            self.update_exe_paths(next_x, y)
+            y_pred_sample = y.sample()
+            self.update_exe_paths(next_x, y_pred_sample)
             return next_x
         else:
             return None

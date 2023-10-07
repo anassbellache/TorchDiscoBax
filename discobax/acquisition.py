@@ -79,24 +79,3 @@ class DiscoBAXAdditive(BaseBatchAcquisitionFunction):
         return selected_indices
 
 
-class DiscoBAXMultiplicative(BaseBatchAcquisitionFunction):
-    def __init__(self, budget, num_samples):
-        self.budget = budget
-        self.num_samples = num_samples
-        self.noise_type = "multiplicative"
-        self.D = []
-        self.params = {}
-
-    def __call__(self,
-                 dataset_x: AbstractDataSource,
-                 batch_size: int,
-                 available_indices: List[AnyStr],
-                 last_selected_indices: List[AnyStr],
-                 last_model: AbstractBaseModel,
-                 ):
-        """
-        Nominate experiments for the next learning round using the DiscoBAX algorithm.
-        """
-        avail_dataset_x = dataset_x.subset(available_indices)
-        self.algo = SubsetSelect(avail_dataset_x, "multiplicative")
-        self.algo.initialize()

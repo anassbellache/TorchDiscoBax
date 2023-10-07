@@ -34,7 +34,7 @@ class BaseGPModel(AbstractBaseModel):
         super().__init__()
         self.num_samples = None
         self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
-        self.model = NeuralGPModel(input_x, input_y, self.likelihood)
+        self.model = NeuralGPModel(input_x, input_y, self.likelihood).float()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.1)
         self.return_samples = True
         self.data_dim = input_x.size(-1)
@@ -246,6 +246,7 @@ class SimpleGPClassifier(gpytorch.models.ApproximateGP, botorch.models.model.Fan
 
         self.mean_module = gpytorch.means.ConstantMean()
         self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
+        self.likelihood = gpytorch.likelihoods.BernoulliLikelihood()
 
     def condition_on_observations(self: TFantasizeMixin, X: Tensor, Y: Tensor, **kwargs: Any) -> TFantasizeMixin:
         """
