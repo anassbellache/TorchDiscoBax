@@ -24,7 +24,7 @@ class DiscoBAXAdditive(BaseBatchAcquisitionFunction):
         self.k = k
         self.data = []
 
-    def expected_information_gain(self, dataset_x: AbstractDataSource, subset_selector: SubsetSelect, last_model: BaseGPModel) -> torch.Tensor:
+    def expected_information_gain(self, x: torch.Tensor, subset_selector: SubsetSelect, last_model: BaseGPModel) -> torch.Tensor:
         # Calculate the Expected Information Gain (EIG) for x
 
         # Step 1: Compute the current entropy of the model's predictions at the locations of previously evaluated points
@@ -32,7 +32,7 @@ class DiscoBAXAdditive(BaseBatchAcquisitionFunction):
         current_entropy = -torch.sum(current_posterior.mean * torch.log(current_posterior.mean))
 
         # Step 2: Compute the expected entropy after hypothetically adding x to the training set
-        x_posterior = last_model.get_posterior(dataset_x)
+        x_posterior = last_model.get_posterior(x)
         expected_entropy_at_x = -torch.sum(x_posterior.mean * torch.log(x_posterior.mean))
 
         # Step 3: The EIG is the difference between the current entropy and the expected entropy
@@ -53,7 +53,7 @@ class DiscoBAXAdditive(BaseBatchAcquisitionFunction):
             exe_path = subset_selector.get_exe_paths(last_model)
 
             # Calculate EIG for each point in available_indices. Note: Depending on how you're using exe_path, you might need to pass it to the expected_information_gain function or use it in another way.
-            eig_values = [self.expected_information_gain(dataset_x[x], subset_selector, last_model) for x in available_indices]
+            eig_values = [self.expected_information_gain(torch.tensor([x]), subset_selector, last_model) for x in available_indices]
 
             # Select the point with the maximum EIG
             max_index = torch.argmax(torch.tensor(eig_values))
