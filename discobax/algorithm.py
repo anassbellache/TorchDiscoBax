@@ -295,9 +295,7 @@ class SubsetSelect(Algorithm):
 
             # Get the prediction using the predict method
             y_pred = f.model(next_x)
-
             # If y_pred is a list (mean, std, margins), then take the mean.
-            # If it's already a scalar, then it remains unchanged.
             y = y_pred[0] if isinstance(y_pred, list) else y_pred
             y_pred_sample = y.sample()
             self.update_exe_paths(next_x, y_pred_sample)
@@ -323,6 +321,7 @@ class SubsetSelect(Algorithm):
         """
         Get the execution paths for x values and their corresponding model predictions.
         """
+        self.initialize()
         with torch.no_grad():
             x = self.take_step(f)
             while x is not None:

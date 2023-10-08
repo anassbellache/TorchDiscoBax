@@ -82,6 +82,14 @@ class BaseGPModel(AbstractBaseModel):
         else:
             return [pred_mean, pred_std, y_margins]
 
+    def get_posterior(self, dataset_x: AbstractDataSource):
+        x_tensor = torch.tensor(dataset_x.get_data(), dtype=torch.float32)
+        self.model.eval()
+        self.likelihood.eval()
+        with torch.no_grad(), gpytorch.settings.fast_pred_var():
+            observed_pred = self.likelihood(self.model(x_tensor))
+        return observed_pred
+
     def fit(self, train_x: AbstractDataSource, train_y: Optional[AbstractDataSource] = None,
             validation_set_x: Optional[AbstractDataSource] = None,
             validation_set_y: Optional[AbstractDataSource] = None) -> "AbstractBaseModel":
