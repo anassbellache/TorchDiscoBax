@@ -53,9 +53,7 @@ class DiscoBAXAdditive(BaseBatchAcquisitionFunction):
             exe_path = subset_selector.get_exe_paths(last_model)
 
             # Calculate EIG for each point in available_indices. Note: Depending on how you're using exe_path, you might need to pass it to the expected_information_gain function or use it in another way.
-            eig_values = [self.expected_information_gain(torch.tensor([x]).unsqueeze(0), subset_selector, last_model)
-                          for x in available_indices]
-            # Note: Depending on your expected_information_gain function, you might not need the unsqueeze operation.
+            eig_values = [self.expected_information_gain(dataset_x[x], subset_selector, last_model) for x in available_indices]
 
             # Select the point with the maximum EIG
             max_index = torch.argmax(torch.tensor(eig_values))
