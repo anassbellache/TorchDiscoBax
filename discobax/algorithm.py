@@ -180,7 +180,6 @@ class TopK(FixedPathAlgorithm):
 
 
 class SubsetSelect(Algorithm):
-
     def __init__(self, X: AbstractDataSource, noise_type, n_samples=1000, k=1):
         """
             Initialize the SubsetSelect algorithm.

@@ -1,8 +1,4 @@
-from typing import List, AnyStr
-
 import torch
-from botorch.acquisition import qMaxValueEntropy
-from botorch.optim import optimize_acqf
 from genedisco.active_learning_methods.acquisition_functions.base_acquisition_function import \
     BaseBatchAcquisitionFunction
 from slingpy import AbstractDataSource, AbstractBaseModel
@@ -11,71 +7,67 @@ from algorithm import SubsetSelect
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+from typing import List, AnyStr
+
 
 class DiscoBAXAdditive(BaseBatchAcquisitionFunction):
-    def __init__(self, budget, num_samples, mc_samples):
+
+    def __init__(self,
+                 budget: int,
+                 mc_samples: int,
+                 noise_type: str = 'additive',
+                 k: int = 1):
+        """
+        Initialize the DiscoBAXAdditive algorithm.
+
+        :param budget: Number of iterations.
+        :param mc_samples: Number of Monte Carlo samples.
+        :param noise_type: Type of noise - either 'additive' or 'multiplicative'.
+        :param k: Number of subset points to select.
+        """
+        super().__init__()
         self.budget = budget
-        self.num_samples = num_samples
         self.mc_samples = mc_samples
-        self.D = []
-        self.algo = None
+        self.noise_type = noise_type
+        self.k = k
+        self.data = []
+
+    def expected_information_gain(self, x: torch.Tensor, subset_selector: SubsetSelect, model: AbstractBaseModel) -> torch.Tensor:
+        # Calculate the Expected Information Gain (EIG) for x using the subset_selector
+        # This requires more information about the form of EIG. For now, I'll assume it's
+        # based on the `monte_carlo_expectation` method of the SubsetSelect class.
+        S = torch.tensor([x]).float()
+        return subset_selector.monte_carlo_expectation(S, model)
 
     def __call__(self,
                  dataset_x: AbstractDataSource,
                  batch_size: int,
                  available_indices: List[AnyStr],
                  last_selected_indices: List[AnyStr],
-                 last_model: AbstractBaseModel,
-                 ):
-        """
-        Nominate experiments for the next learning rounds using the DiscoBAX algorithm.
-        """
-        # List to hold selected indices
+                 last_model: AbstractBaseModel) -> List:
         selected_indices = []
 
-        for i in range(self.budget):
-            # Sample l functions from the posterior
-            functions = [last_model.posterior(dataset_x.subset(available_indices)).rsample() for _ in
-                         range(self.mc_samples)]
+        for _ in range(self.budget):
+            subset_selector = SubsetSelect(X=dataset_x, noise_type=self.noise_type, n_samples=self.mc_samples, k=self.k)
+            # Sample functions from the model's posterior and get the subsets S_j
+            subset_selector.get_exe_paths(last_model)
 
-            S = []
-            for j, f in enumerate(functions):
-                self.algo = SubsetSelect(f, "additive")
-                self.algo.initialize()
-                exe_path = self.algo.get_exe_paths(last_model)
-                new_x = torch.tensor(exe_path.x, device=device)
-                new_y = torch.tensor(exe_path.y, device=device)
-                S.append((new_x, new_y))
+            # Calculate EIG for each point in available_indices
+            eig_values = [self.expected_information_gain(x, subset_selector, last_model) for x in available_indices]
 
-            # Create a combined acquisition function over all S samples
-            acq_func = qMaxValueEntropy(
-                model=last_model.model,
-                train_x=torch.cat([s[0] for s in S], dim=0)
-            )
+            # Select the point with the maximum EIG
+            max_index = torch.argmax(torch.tensor(eig_values))
+            xi = available_indices[max_index]
 
-            # Use optimize_acqf to get the best next point
-            bounds = torch.stack([torch.min(torch.cat([s[0] for s in S], dim=0), dim=0).values,
-                                  torch.max(torch.cat([s[0] for s in S], dim=0), dim=0).values])
-            candidate, _ = optimize_acqf(
-                acq_function=acq_func,
-                bounds=bounds,
-                q=1,
-                num_restarts=5,
-                raw_samples=100,  # Number of initial raw samples
-                options={"batch_limit": 5, "maxiter": 200},
-                sequential=True,
-            )
+            # Append to the selected indices
+            selected_indices.append(xi)
 
-            # Find the index of the candidate in the available_indices
-            candidate_idx = available_indices[
-                torch.argmin(torch.norm(dataset_x.subset(available_indices) - candidate, dim=1))]
+            # "Query" and update the dataset (assuming querying here means adding to the dataset)
+            # This part requires more context on how you'd like to "query" the data.
+            # For now, I'll just append it to our dataset `self.data`.
+            self.data.append((xi, last_model.model(torch.tensor([xi]))))
 
-            # Append to selected_indices
-            selected_indices.append(candidate_idx)
-
-            # Remove the selected index from available_indices to prevent reselection in the next iteration
-            available_indices.remove(candidate_idx)
+            # Remove the selected index from available_indices
+            available_indices.pop(max_index)
 
         return selected_indices
-
-
