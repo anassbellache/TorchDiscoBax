@@ -4,9 +4,8 @@ import torch
 from genedisco.active_learning_methods.acquisition_functions.base_acquisition_function import \
     BaseBatchAcquisitionFunction
 from slingpy import AbstractDataSource, AbstractBaseModel
-from gp_model import BaseGPModel
-
-from algorithm import SubsetSelect
+from .gp_model import BaseGPModel
+from .algorithm import SubsetSelect
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
