@@ -13,12 +13,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class DiscoBAXAdditive(BaseBatchAcquisitionFunction):
 
     def __init__(self,
-                 budget: int,
                  mc_samples: int,
                  noise_type: str = 'additive',
                  k: int = 1):
         super().__init__()
-        self.budget = budget
         self.mc_samples = mc_samples
         self.noise_type = noise_type
         self.k = k

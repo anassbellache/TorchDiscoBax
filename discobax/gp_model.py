@@ -82,9 +82,6 @@ class BaseGPModel(AbstractBaseModel):
         # Compute the margins
         y_margins = upper_bound - lower_bound
 
-        if self.num_samples is None:
-            raise ValueError("The model hasn't been fit yet. Please fit the model before predicting.")
-
         if self.return_samples:
             samples = np.concatenate(all_samples, axis=0)
             return [pred_mean, pred_std, y_margins, samples]
