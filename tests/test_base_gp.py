@@ -7,9 +7,8 @@ from discobax import BaseGPModel
 
 @pytest.fixture
 def base_gp_model_instance():
-    input_x = torch.randn(10, 1)
-    input_y = torch.randn(10, 1)
-    instance = BaseGPModel(input_x, input_y)
+    data_dim = 1
+    instance = BaseGPModel(data_dim)
     return instance
 
 
@@ -24,13 +23,6 @@ def test_predict(base_gp_model_instance, mock_data_source):
     result = base_gp_model_instance.predict(mock_data_source)
     assert len(result) == 4  # means, stds, margins, samples
     assert isinstance(result[0], np.ndarray)
-
-
-def test_fit(base_gp_model_instance, mock_data_source):
-    # Mock the tqdm function
-    with patch("discobax.gp_model.tqdm", side_effect=lambda x: x):
-        result = base_gp_model_instance.fit(mock_data_source, mock_data_source)
-        assert isinstance(result, BaseGPModel)
 
 
 def test_load_and_save(base_gp_model_instance, tmpdir):

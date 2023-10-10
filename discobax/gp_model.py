@@ -21,23 +21,24 @@ from botorch.models.model import TFantasizeMixin
 from botorch.posteriors import GPyTorchPosterior
 from botorch.posteriors import Posterior
 from gpytorch.distributions import MultitaskMultivariateNormal
+from gpytorch.distributions import MultivariateNormal
+from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.likelihoods import _GaussianLikelihoodBase
+from gpytorch.mlls import ExactMarginalLogLikelihood
 from slingpy import AbstractBaseModel, AbstractDataSource
-from torch import Tensor
+from torch import Tensor, optim
 from torch.nn import Module
-from torch.utils.data import DataLoader, TensorDataset
-from tqdm import tqdm
 
 
 class BaseGPModel(AbstractBaseModel):
-    def __init__(self, input_x, input_y):
-        super().__init__()
+    def __init__(self, dim_input):
+        super(BaseGPModel).__init__()
         self.num_samples = None
         self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
-        self.model = NeuralGPModel(input_x, input_y, self.likelihood).float()
+        self.model = NeuralGPModel(dim_input, self.likelihood).float()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.1)
         self.return_samples = True
-        self.data_dim = input_x.size(-1)
+        self.data_dim = dim_input
 
     def predict(self, dataset_x: AbstractDataSource, batch_size: int = 256, row_names: List[AnyStr] = None) -> List[
         np.ndarray]:
@@ -53,8 +54,8 @@ class BaseGPModel(AbstractBaseModel):
 
         all_pred_means = []
         all_pred_stds = []
+        all_samples = []
 
-        # Process each batch
         with torch.no_grad(), gpytorch.settings.fast_pred_var():
             for i in range(num_batches):
                 start_i = i * batch_size
@@ -64,6 +65,11 @@ class BaseGPModel(AbstractBaseModel):
                 observed_pred = self.likelihood(self.model(batch_x))
                 all_pred_means.append(observed_pred.mean.numpy())
                 all_pred_stds.append(observed_pred.stddev.numpy())
+
+                # Sample from the predictive distribution if required
+                if self.return_samples:
+                    batch_samples = observed_pred.sample(sample_shape=torch.Size([self.num_samples]))
+                    all_samples.append(batch_samples.numpy())
 
         # Concatenate results from all batches
         pred_mean = np.concatenate(all_pred_means, axis=0)
@@ -76,9 +82,12 @@ class BaseGPModel(AbstractBaseModel):
         # Compute the margins
         y_margins = upper_bound - lower_bound
 
+        if self.num_samples is None:
+            raise ValueError("The model hasn't been fit yet. Please fit the model before predicting.")
+
         if self.return_samples:
-            samples = observed_pred.sample(sample_shape=torch.Size([num_samples]))
-            return [pred_mean, pred_std, y_margins, samples.numpy()]
+            samples = np.concatenate(all_samples, axis=0)
+            return [pred_mean, pred_std, y_margins, samples]
         else:
             return [pred_mean, pred_std, y_margins]
 
@@ -105,28 +114,30 @@ class BaseGPModel(AbstractBaseModel):
         self.num_samples = train_y.size(0)
 
         noise = 1e-4
-        num_train_iters = 500
         self.likelihood.noise = noise
         self.model.train()
         self.likelihood.train()
+        if torch.cuda.is_available():
+            self.model = self.model.cuda()
+            self.likelihood = self.likelihood.cuda()
+            train_x, train_y = train_x.cuda(), train_y.cuda()
 
-        mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.likelihood, self.model)
+        # 2. Define an optimizer
+        optimizer = optim.Adam(self.model.parameters(), lr=0.1)  # 0.1 is the learning rate
 
-        train_dataset = TensorDataset(train_x, train_y)
-        train_loader = DataLoader(train_dataset, batch_size=100)
+        # 3. Define the marginal log likelihood
+        mll = ExactMarginalLogLikelihood(self.likelihood, self.model)
 
-        losses = []
-        for i in tqdm(range(num_train_iters)):
-            for x_batch, y_batch in train_loader:
-                self.optimizer.zero_grad()
-
-                output = self.model(x_batch)
-                loss = -mll(output, y_batch)
-                loss = loss.mean()
-
-                loss.backward()
-                losses.append(loss.item())
-                self.optimizer.step()
+        # 4. Define the training loop
+        num_epochs = 50
+        for epoch in range(num_epochs):
+            # Zero gradients from previous iteration
+            optimizer.zero_grad()
+            output = self.model(train_x)
+            loss = -mll(output, train_y)
+            print(f"Epoch {epoch + 1}/{num_epochs} - Loss: {loss.item()}")
+            loss.backward()
+            optimizer.step()
 
         self.model.eval()
         self.likelihood.eval()
@@ -146,12 +157,11 @@ class BaseGPModel(AbstractBaseModel):
         # Load the saved state dictionary
         state_dict = torch.load(file_path)
 
-        # Create dummy data
-        dummy_x = torch.zeros((1, state_dict["data_dim"]))  # adjust shape as necessary
-        # dummy_y = torch.zeros((1, state_dict["train_y_dim"]))  # if needed
+        # Extract data_dim from the saved state
+        data_dim = state_dict["data_dim"]
 
-        # Create a new model instance with dummy data
-        model = cls(dummy_x, None)  # or (dummy_x, dummy_y)
+        # Create a new model instance with the extracted data_dim
+        model = cls(data_dim)
 
         # Restore the state of the model and the likelihood
         model.model.load_state_dict(state_dict["model"])
@@ -168,21 +178,13 @@ class BaseGPModel(AbstractBaseModel):
         Save the model to the specified file path.
 
         Parameters:
-        - file_path (str): The path where the model should be saved.
+            - file_path (str): The path to where the model should be saved.
         """
-        # Create a dictionary to store the model and likelihood state dicts
         state_dict = {
+            "data_dim": self.data_dim,
             "model": self.model.state_dict(),
             "likelihood": self.likelihood.state_dict(),
-            "num_data": self.num_samples,
-            "data_dim": self.data_dim
         }
-
-        # Only save the state dictionary of the optimizers if they are not None
-        if self.optimizer is not None:
-            state_dict["optimizer"] = self.optimizer.state_dict()
-
-        # Save the state dictionary to the specified file path
         torch.save(state_dict, file_path)
 
 
@@ -273,7 +275,8 @@ class SimpleGPClassifier(gpytorch.models.ApproximateGP, botorch.models.model.Fan
         updated_train_y = torch.cat([self.train_targets, Y], dim=0)
 
         # Create a new model with the updated data.
-        new_model = self.__class__(updated_train_x, updated_train_y, self.likelihood)
+        new_dim = updated_train_x.size(-1)
+        new_model = self.__class__(new_dim, self.likelihood)
         new_model.likelihood = self.likelihood
         new_model.mean_module = self.mean_module
         new_model.covar_module = self.covar_module
@@ -322,16 +325,43 @@ class LargeFeatureExtractor(torch.nn.Sequential):
 
 
 class NeuralGPModel(gpytorch.models.ExactGP, botorch.models.model.FantasizeMixin):
-    def __init__(self, train_x, train_y, likelihood):
-        super().__init__(train_x, train_y, likelihood)
+    def __init__(self, data_dim, likelihood):
+        super().__init__(None, None, likelihood)
 
-        data_dim = train_x.size(-1)
+        self.data_dim = data_dim
         self.feature_extractor = LargeFeatureExtractor(data_dim)
         self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(-1., 1.)
         self.mean_module = gpytorch.means.ConstantMean()
         self.covar_module = gpytorch.kernels.ScaleKernel(
             gpytorch.kernels.MaternKernel(nu=2.5)
         )
+
+    def update_train_data(self, new_x: Tensor, new_y: Tensor) -> None:
+        """
+        Update the model's training data with new observations.
+
+        Args:
+            new_x: New training inputs.
+            new_y: New training targets.
+        """
+        new_x_projected = self.feature_extractor(new_x)
+
+        if self.train_inputs[0] is None:
+            updated_train_x = new_x_projected
+            updated_train_y = new_y
+        else:
+            # Make sure self.train_inputs[0] is the projected version
+            train_inputs_projected = self.feature_extractor(self.train_inputs[0])
+
+            # Concatenate old and new data
+            if train_inputs_projected.dim() == 1:
+                updated_train_x = torch.cat([train_inputs_projected, new_x_projected.squeeze(0)], dim=0)
+            else:
+                updated_train_x = torch.cat([train_inputs_projected, new_x_projected], dim=0)
+
+            updated_train_y = torch.cat([self.train_targets, new_y], dim=0)
+
+        self.set_train_data(updated_train_x, updated_train_y, strict=False)
 
     def condition_on_observations(self, X: Tensor, Y: Tensor, **kwargs: Any) -> 'NeuralGPModel':
         """
@@ -349,13 +379,14 @@ class NeuralGPModel(gpytorch.models.ExactGP, botorch.models.model.FantasizeMixin
             updated_train_x = torch.cat([train_inputs_projected, X_projected], dim=0)
 
         updated_train_y = torch.cat([self.train_targets, Y], dim=0)
+        data_dim = updated_train_x.shape(-1)
 
-        # Create a new model with the updated data.
-        new_model = self.__class__(updated_train_x, updated_train_y, self.likelihood)
+        new_model = self.__class__(data_dim, self.likelihood)
         new_model.likelihood = self.likelihood
         new_model.mean_module = self.mean_module
         new_model.covar_module = self.covar_module
         new_model.feature_extractor = self.feature_extractor
+        new_model.set_train_data(updated_train_x, updated_train_y)
 
         return new_model
 
@@ -364,13 +395,10 @@ class NeuralGPModel(gpytorch.models.ExactGP, botorch.models.model.FantasizeMixin
         # Obtain the prior distribution.
         mvn = self(X)
 
-        if observation_noise:
-            if isinstance(self.likelihood, _GaussianLikelihoodBase):
-                # Adjust the variance using the likelihood's noise.
-                noise = self.likelihood.noise
-                mvn = MultitaskMultivariateNormal(
-                    mvn.mean, mvn.lazy_covariance_matrix.add_diag(noise)
-                )
+        # If observation noise should be added and the likelihood is GaussianLikelihood
+        if observation_noise and isinstance(self.likelihood, GaussianLikelihood):
+            noise = self.likelihood.noise
+            mvn = MultivariateNormal(mvn.mean, mvn.lazy_covariance_matrix.add_diag(noise))
 
         # Return the botorch wrapper around GPyTorch's posterior.
         return GPyTorchPosterior(mvn)
