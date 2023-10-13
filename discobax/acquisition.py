@@ -17,6 +17,7 @@ class DiscoBAXAdditive(BaseBatchAcquisitionFunction):
                  noise_type: str = 'additive',
                  k: int = 1):
         super().__init__()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.mc_samples = mc_samples
         self.noise_type = noise_type
         self.k = k
@@ -24,6 +25,7 @@ class DiscoBAXAdditive(BaseBatchAcquisitionFunction):
 
     def expected_information_gain(self, x: torch.Tensor, subset_selector: SubsetSelect, last_model: BaseGPModel) -> torch.Tensor:
         # Calculate the Expected Information Gain (EIG) for x
+        x = x.to(self.device)
 
         # Step 1: Compute the current entropy of the model's predictions at the locations of previously evaluated points
         current_posterior = last_model.get_posterior(subset_selector.exe_path.x)
@@ -50,7 +52,7 @@ class DiscoBAXAdditive(BaseBatchAcquisitionFunction):
             subset_selector = SubsetSelect(X=dataset_x, noise_type=self.noise_type, n_samples=self.mc_samples, k=self.k)
             exe_path = subset_selector.get_exe_paths(last_model)
 
-            eig_values = [self.expected_information_gain(torch.tensor([x]), subset_selector, last_model) for x in available_indices]
+            eig_values = [self.expected_information_gain(torch.tensor([x]).to(self.device), subset_selector, last_model) for x in available_indices]
 
             # Select the point with the maximum EIG
             max_index = torch.argmax(torch.tensor(eig_values))

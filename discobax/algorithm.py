@@ -180,7 +180,7 @@ class TopK(FixedPathAlgorithm):
 
 
 class SubsetSelect(Algorithm):
-    def __init__(self, X: AbstractDataSource, noise_type, n_samples=1000, k=1):
+    def __init__(self, X: AbstractDataSource, noise_type, device, n_samples=1000, k=1):
         """
             Initialize the SubsetSelect algorithm.
 
@@ -190,24 +190,24 @@ class SubsetSelect(Algorithm):
             :param k: Number of subset points to select.
         """
         super().__init__(params={})
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
         self.noise_type = noise_type
         self.k = k
-        self.X = torch.tensor(X.get_data(), device=device, dtype=torch.float32)
+        self.X = torch.tensor(X.get_data(), device=self.device, dtype=torch.float32)
         self.selected_subset = []
         self.mc_samples = n_samples
         self.exe_path = dict_to_namespace({"x": [], "y": []})
-        input_dim = self.X.shape[-1]  # input_dim is the dimension of your input data
+        input_dim = self.X.shape[-1]
 
         if noise_type == "multiplicative":
             num_inducing_points = 10
-            inducing_points = torch.randn(num_inducing_points, input_dim)
-            self.noise_gp = SimpleGPClassifier(inducing_points)
-            self.noise_likelihood = gpytorch.likelihoods.BernoulliLikelihood()
+            inducing_points = torch.randn(num_inducing_points, input_dim, device=self.device)
+            self.noise_gp = SimpleGPClassifier(inducing_points).to(self.device)
+            self.noise_likelihood = gpytorch.likelihoods.BernoulliLikelihood().to(self.device)
 
         elif noise_type == "additive":
-            self.noise_likelihood = gpytorch.likelihoods.GaussianLikelihood()
-            self.noise_gp = SimpleGPRegressor(None, None, self.noise_likelihood)
+            self.noise_likelihood = gpytorch.likelihoods.GaussianLikelihood().to(self.device)
+            self.noise_gp = SimpleGPRegressor(None, None, self.noise_likelihood, device)
 
         else:
             raise ValueError("noise_type must be either 'additive' or 'multiplicative'")
@@ -223,6 +223,8 @@ class SubsetSelect(Algorithm):
         :param S: Set of candidate points.
         :return: Expected max value across the sampled functions for each candidate point.
         """
+        S = S.to(self.device)
+        f = f.to(self.device)
         f.eval()
         sampler = SobolQMCNormalSampler(sample_shape=torch.Size([self.mc_samples]))  # Initialize the Sobol sampler
 
@@ -266,12 +268,14 @@ class SubsetSelect(Algorithm):
 
         :return: Point from X that is estimated to maximize the expectation.
         """
+        # mask creation
         mask = torch.tensor(
-            [not any(torch.allclose(x.float(), torch.tensor(selected).float()) for selected in self.selected_subset) for
-             x in self.X],
-            dtype=torch.bool
+            [not any(torch.allclose(x.float(), torch.tensor(selected).float().to(self.device)) for selected in self.selected_subset) for x in self.X],
+            dtype=torch.bool, device=self.device
         )
+
         candidates_from_mask = self.X[mask]
+        concatenated_candidates = torch.cat([torch.tensor(x, device=self.device).float().unsqueeze(0) for x in self.selected_subset] + [candidates_from_mask], dim=0).float()
         concatenated_candidates = torch.cat([torch.tensor(x).float().unsqueeze(0) for x in self.selected_subset] + [candidates_from_mask], dim=0).float()
 
         scores = self.monte_carlo_expectation(concatenated_candidates, f.model)
@@ -307,6 +311,8 @@ class SubsetSelect(Algorithm):
         """
         Update the execution paths with the newly selected point and its value.
         """
+        x = x.to(self.device)
+        y = y.to(self.device)
         self.exe_path.x.append(x)
         self.exe_path.y.append(y)
 

@@ -31,19 +31,20 @@ from torch.nn import Module
 
 
 class BaseGPModel(AbstractBaseModel):
-    def __init__(self, dim_input):
+    def __init__(self, dim_input, device):
         super(BaseGPModel).__init__()
         self.num_samples = None
-        self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
-        self.model = NeuralGPModel(dim_input, self.likelihood).float()
+        self.likelihood = gpytorch.likelihoods.GaussianLikelihood().to(device)
+        self.model = NeuralGPModel(dim_input, self.likelihood).float().to(device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.1)
         self.return_samples = True
         self.data_dim = dim_input
+        self.device = device
 
     def predict(self, dataset_x: AbstractDataSource, batch_size: int = 256, row_names: List[AnyStr] = None) -> List[
         np.ndarray]:
         # Convert dataset_x to a PyTorch tensor
-        x_tensor = torch.tensor(dataset_x.get_data(), dtype=torch.float32)
+        x_tensor = torch.tensor(dataset_x.get_data(), dtype=torch.float32).to(self.device)
 
         self.model.eval()
         self.likelihood.eval()
@@ -106,18 +107,14 @@ class BaseGPModel(AbstractBaseModel):
             raise ValueError("train_x cannot be None")
 
         # Convert AbstractDataSource to torch.Tensor
-        train_x = torch.tensor(train_x.get_data(), dtype=torch.float32)
-        train_y = torch.tensor(train_y.get_data(), dtype=torch.float32)
+        train_x = torch.tensor(train_x.get_data(), dtype=torch.float32).to(self.device)
+        train_y = torch.tensor(train_y.get_data(), dtype=torch.float32).to(self.device)
         self.num_samples = train_y.size(0)
 
         noise = 1e-4
         self.likelihood.noise = noise
         self.model.train()
         self.likelihood.train()
-        if torch.cuda.is_available():
-            self.model = self.model.cuda()
-            self.likelihood = self.likelihood.cuda()
-            train_x, train_y = train_x.cuda(), train_y.cuda()
 
         # 2. Define an optimizer
         optimizer = optim.Adam(self.model.parameters(), lr=0.1)  # 0.1 is the learning rate
@@ -132,6 +129,7 @@ class BaseGPModel(AbstractBaseModel):
             optimizer.zero_grad()
             output = self.model(train_x)
             loss = -mll(output, train_y)
+            loss = loss.mean()
             print(f"Epoch {epoch + 1}/{num_epochs} - Loss: {loss.item()}")
             loss.backward()
             optimizer.step()
@@ -151,14 +149,15 @@ class BaseGPModel(AbstractBaseModel):
         Returns:
             - model (BaseGPModel): The loaded model.
         """
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Load the saved state dictionary
-        state_dict = torch.load(file_path)
+        state_dict = torch.load(file_path, map_location=device)
 
         # Extract data_dim from the saved state
         data_dim = state_dict["data_dim"]
 
         # Create a new model instance with the extracted data_dim
-        model = cls(data_dim)
+        model = cls(data_dim, device)
 
         # Restore the state of the model and the likelihood
         model.model.load_state_dict(state_dict["model"])
@@ -186,10 +185,11 @@ class BaseGPModel(AbstractBaseModel):
 
 
 class SimpleGPRegressor(gpytorch.models.ExactGP, botorch.models.model.FantasizeMixin):
-    def __init__(self, train_x, train_y, likelihood):
+    def __init__(self, train_x, train_y, likelihood, device):
         super(SimpleGPRegressor, self).__init__(train_x, train_y, likelihood)
-        self.mean_module = gpytorch.means.ConstantMean()
-        self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
+        self.device = device
+        self.mean_module = gpytorch.means.ConstantMean().to(self.device)
+        self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel()).to(self.device)
 
     def posterior(self, X: Tensor, observation_noise: bool = False, **kwargs: Any) -> Posterior:
         # Process the input through the neural network.
@@ -347,7 +347,6 @@ class NeuralGPModel(gpytorch.models.ExactGP, botorch.models.model.FantasizeMixin
             updated_train_x = new_x_projected
             updated_train_y = new_y
         else:
-            # Make sure self.train_inputs[0] is the projected version
             train_inputs_projected = self.feature_extractor(self.train_inputs[0])
 
             # Concatenate old and new data
