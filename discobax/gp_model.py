@@ -25,29 +25,41 @@ from gpytorch.distributions import MultivariateNormal
 from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.likelihoods import _GaussianLikelihoodBase
 from gpytorch.mlls import ExactMarginalLogLikelihood
+from gpytorch.constraints import GreaterThan, Interval
 from slingpy import AbstractBaseModel, AbstractDataSource
 from torch import Tensor, optim
 from torch.nn import Module
 
 
 class BaseGPModel(AbstractBaseModel):
-    def __init__(self, dim_input, device):
+    def __init__(self, dim_input, device, noise_type: str = 'additive'):
         super(BaseGPModel).__init__()
         self.num_samples = None
         self.likelihood = gpytorch.likelihoods.GaussianLikelihood().to(device)
         self.model = NeuralGPModel(dim_input, self.likelihood).float().to(device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.1)
-        self.return_samples = True
+        self.return_samples = False
         self.data_dim = dim_input
         self.device = device
+        self.noise_type = noise_type
+
+        if noise_type == "multiplicative":
+            num_inducing_points = 10
+            inducing_points = torch.randn(num_inducing_points, dim_input, device=self.device)
+            self.noise_gp = SimpleGPClassifier(inducing_points).to(self.device)
+            self.noise_likelihood = gpytorch.likelihoods.BernoulliLikelihood().to(self.device)
+
+        elif noise_type == "additive":
+            self.noise_likelihood = gpytorch.likelihoods.GaussianLikelihood().to(self.device)
+            self.noise_gp = SimpleGPRegressor(None, None, self.noise_likelihood, self.device)
 
     def predict(self, dataset_x: AbstractDataSource, batch_size: int = 256, row_names: List[AnyStr] = None) -> List[
         np.ndarray]:
-        # Convert dataset_x to a PyTorch tensor
         x_tensor = torch.tensor(dataset_x.get_data(), dtype=torch.float32).to(self.device)
-
         self.model.eval()
         self.likelihood.eval()
+        self.noise_gp.eval()
+        self.noise_likelihood.eval()
 
         # Split the data into batches
         num_samples = x_tensor.size(0)
@@ -63,14 +75,26 @@ class BaseGPModel(AbstractBaseModel):
                 end_i = min((i + 1) * batch_size, num_samples)
                 batch_x = x_tensor[start_i:end_i]
 
-                observed_pred = self.likelihood(self.model(batch_x))
-                all_pred_means.append(observed_pred.mean.numpy())
-                all_pred_stds.append(observed_pred.stddev.numpy())
+                main_pred = self.likelihood(self.model(batch_x))
+                noise_pred = self.noise_likelihood(self.noise_gp(batch_x))
+
+                combined_mean = main_pred.mean + noise_pred.mean
+                combined_stddev = torch.sqrt(main_pred.variance + noise_pred.variance)
+
+                all_pred_means.append(combined_mean.cpu().numpy())
+                all_pred_stds.append(combined_stddev.cpu().numpy())
 
                 # Sample from the predictive distribution if required
                 if self.return_samples:
-                    batch_samples = observed_pred.sample(sample_shape=torch.Size([self.num_samples]))
-                    all_samples.append(batch_samples.numpy())
+                    # Since sampling from the sum of two GP posteriors isn't straightforward,
+                    # for simplicity we'll sample separately and add them.
+                    main_sample = main_pred.sample(sample_shape=torch.Size([self.num_samples]))
+                    noise_sample = noise_pred.sample(sample_shape=torch.Size([self.num_samples]))
+                    combined_sample = main_sample + noise_sample
+
+                    all_samples.append(combined_sample.cpu().numpy())
+
+                print(f"Batch {i}: {combined_mean.shape}")
 
         # Concatenate results from all batches
         pred_mean = np.concatenate(all_pred_means, axis=0)
@@ -87,7 +111,7 @@ class BaseGPModel(AbstractBaseModel):
             samples = np.concatenate(all_samples, axis=0)
             return [pred_mean, pred_std, y_margins, samples]
         else:
-            return [pred_mean, pred_std, y_margins]
+            return pred_mean
 
     def get_posterior(self, x_tensor):
         self.model.eval()
@@ -115,27 +139,42 @@ class BaseGPModel(AbstractBaseModel):
         self.likelihood.noise = noise
         self.model.train()
         self.likelihood.train()
+        self.noise_gp.train()
+        self.noise_likelihood.train()
 
-        # 2. Define an optimizer
-        optimizer = optim.Adam(self.model.parameters(), lr=0.1)  # 0.1 is the learning rate
+        # Combine parameters of both models for simultaneous optimization
+        optimizer = optim.Adam(list(self.model.parameters()) + list(self.noise_gp.parameters()), lr=0.1)
 
-        # 3. Define the marginal log likelihood
-        mll = ExactMarginalLogLikelihood(self.likelihood, self.model)
+        # Loss function to measure the error between the predicted and actual values
+        loss_function = torch.nn.MSELoss()
 
         # 4. Define the training loop
         num_epochs = 50
         for epoch in range(num_epochs):
-            # Zero gradients from previous iteration
             optimizer.zero_grad()
-            output = self.model(train_x)
-            loss = -mll(output, train_y)
-            loss = loss.mean()
+
+            # Predictions
+            main_output = self.model(train_x)
+            noise_output = self.noise_gp(train_x)
+
+            # Combined prediction
+            combined_output = main_output.mean + noise_output.mean
+
+            # Calculate the combined loss
+            loss = loss_function(combined_output, train_y)
+
             print(f"Epoch {epoch + 1}/{num_epochs} - Loss: {loss.item()}")
+
+            # Backpropagation and optimization
             loss.backward()
             optimizer.step()
 
+        # Set both models to evaluation mode after training
         self.model.eval()
         self.likelihood.eval()
+        self.noise_gp.eval()
+        self.noise_likelihood.eval()
+
         return self
 
     @classmethod
@@ -188,7 +227,7 @@ class SimpleGPRegressor(gpytorch.models.ExactGP, botorch.models.model.FantasizeM
     def __init__(self, train_x, train_y, likelihood, device):
         super(SimpleGPRegressor, self).__init__(train_x, train_y, likelihood)
         self.device = device
-        self.mean_module = gpytorch.means.ConstantMean().to(self.device)
+        self.mean_module = gpytorch.means.ZeroMean().to(self.device)
         self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel()).to(self.device)
 
     def posterior(self, X: Tensor, observation_noise: bool = False, **kwargs: Any) -> Posterior:
@@ -235,8 +274,10 @@ class SimpleGPRegressor(gpytorch.models.ExactGP, botorch.models.model.FantasizeM
         pass
 
     def forward(self, x):
+        jitter_value = 1e-6
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
+        covar_x = covar_x + torch.eye(x.size(0)).to(self.device) * jitter_value
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
     def __call__(self, x):
@@ -309,16 +350,23 @@ class SimpleGPClassifier(gpytorch.models.ApproximateGP, botorch.models.model.Fan
         return self.forward(x)
 
 
-class LargeFeatureExtractor(torch.nn.Sequential):
+class LargeFeatureExtractor(torch.nn.Module):
     def __init__(self, data_dim):
         super(LargeFeatureExtractor, self).__init__()
-        self.add_module('linear1', torch.nn.Linear(data_dim, 1000))
-        self.add_module('relu1', torch.nn.ReLU())
-        self.add_module('linear2', torch.nn.Linear(1000, 500))
-        self.add_module('relu2', torch.nn.ReLU())
-        self.add_module('linear3', torch.nn.Linear(500, 50))
-        self.add_module('relu3', torch.nn.ReLU())
-        self.add_module('linear4', torch.nn.Linear(50, 2))
+        self.layers = torch.nn.Sequential(
+            torch.nn.Linear(data_dim, 1000),
+            torch.nn.ReLU(),
+            torch.nn.Linear(1000, 500),
+            torch.nn.ReLU(),
+            torch.nn.Linear(500, 50),
+            torch.nn.ReLU(),
+            torch.nn.Linear(50, 2)
+        )
+
+    def forward(self, x):
+        # Pass through the layers
+        x = self.layers(x)
+        return x
 
 
 class NeuralGPModel(gpytorch.models.ExactGP, botorch.models.model.FantasizeMixin):

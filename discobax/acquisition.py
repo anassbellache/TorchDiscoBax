@@ -1,4 +1,4 @@
-from typing import List, AnyStr
+import typing
 
 import torch
 from genedisco.active_learning_methods.acquisition_functions.base_acquisition_function import \
@@ -6,8 +6,6 @@ from genedisco.active_learning_methods.acquisition_functions.base_acquisition_fu
 from slingpy import AbstractDataSource, AbstractBaseModel
 from .gp_model import BaseGPModel
 from .algorithm import SubsetSelect
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class DiscoBAXAdditive(BaseBatchAcquisitionFunction):
@@ -23,7 +21,9 @@ class DiscoBAXAdditive(BaseBatchAcquisitionFunction):
         self.k = k
         self.data = []
 
-    def expected_information_gain(self, x: torch.Tensor, subset_selector: SubsetSelect, last_model: BaseGPModel) -> torch.Tensor:
+    def expected_information_gain(self, x: torch.Tensor, subset_selector: SubsetSelect,
+                                  last_model: BaseGPModel) -> torch.Tensor:
+        print("calculate expected information gain")
         # Calculate the Expected Information Gain (EIG) for x
         x = x.to(self.device)
 
@@ -42,17 +42,20 @@ class DiscoBAXAdditive(BaseBatchAcquisitionFunction):
     def __call__(self,
                  dataset_x: AbstractDataSource,
                  batch_size: int,
-                 available_indices: List[AnyStr],
-                 last_selected_indices: List[AnyStr],
-                 last_model: AbstractBaseModel) -> List:
+                 available_indices: typing.List[typing.AnyStr],
+                 last_selected_indices: typing.List[typing.AnyStr],
+                 last_model: AbstractBaseModel) -> typing.List:
         selected_indices = []
 
         for _ in range(len(available_indices)):
-            # Sample functions from the model's posterior and get the subsets S_j
-            subset_selector = SubsetSelect(X=dataset_x, noise_type=self.noise_type, n_samples=self.mc_samples, k=self.k)
-            exe_path = subset_selector.get_exe_paths(last_model)
+            # Sample functions from the model's posterior and get the subsets S_ji
+            print("subset selector init:")
+            subset_selector = SubsetSelect(X=dataset_x, noise_type=self.noise_type, n_samples=self.mc_samples, k=self.k, device=self.device)
+            print("get exe path")
+            subset_selector.get_exe_paths(last_model)
 
-            eig_values = [self.expected_information_gain(torch.tensor([x]).to(self.device), subset_selector, last_model) for x in available_indices]
+            eig_values = [self.expected_information_gain(torch.tensor([x]).to(self.device), subset_selector, last_model)
+                          for x in available_indices]
 
             # Select the point with the maximum EIG
             max_index = torch.argmax(torch.tensor(eig_values))

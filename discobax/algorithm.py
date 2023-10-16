@@ -199,23 +199,12 @@ class SubsetSelect(Algorithm):
         self.exe_path = dict_to_namespace({"x": [], "y": []})
         input_dim = self.X.shape[-1]
 
-        if noise_type == "multiplicative":
-            num_inducing_points = 10
-            inducing_points = torch.randn(num_inducing_points, input_dim, device=self.device)
-            self.noise_gp = SimpleGPClassifier(inducing_points).to(self.device)
-            self.noise_likelihood = gpytorch.likelihoods.BernoulliLikelihood().to(self.device)
 
-        elif noise_type == "additive":
-            self.noise_likelihood = gpytorch.likelihoods.GaussianLikelihood().to(self.device)
-            self.noise_gp = SimpleGPRegressor(None, None, self.noise_likelihood, device)
-
-        else:
-            raise ValueError("noise_type must be either 'additive' or 'multiplicative'")
 
     def initialize(self):
         self.exe_path = dict_to_namespace({"x": [], "y": []})
 
-    def monte_carlo_expectation(self, S: torch.Tensor, f: NeuralGPModel):
+    def monte_carlo_expectation(self, S: torch.Tensor, f: BaseGPModel):
         """
         Estimate the expectation of the maximum value using Monte Carlo sampling.
 
@@ -223,21 +212,22 @@ class SubsetSelect(Algorithm):
         :param S: Set of candidate points.
         :return: Expected max value across the sampled functions for each candidate point.
         """
+        print("monte carlo expectation")
         S = S.to(self.device)
-        f = f.to(self.device)
-        f.eval()
+        f.model.eval()
+        f.noise_gp.eval()
         sampler = SobolQMCNormalSampler(sample_shape=torch.Size([self.mc_samples]))  # Initialize the Sobol sampler
 
         with torch.no_grad():
             # Get the posterior for the input set S
-            posterior = f.posterior(S)
+            posterior = f.model.posterior(S)
             # Sample from the posterior using SobolQMCNormalSampler
             f_samples = sampler(posterior)
 
             if self.noise_type == 'multiplicative':
-                latent_samples = self.noise_gp(S).rsample(sample_shape=torch.Size([self.mc_samples]))
+                latent_samples = f.noise_gp(S).rsample(sample_shape=torch.Size([self.mc_samples]))
                 # Using the likelihood of the noise_gp to transform latent samples into probabilities
-                eta_samples = self.noise_gp.likelihood(latent_samples).probs.squeeze(-1)
+                eta_samples = f.noise_gp.likelihood(latent_samples).probs.squeeze(-1)
 
                 # Ensure the shapes match for multiplication
                 if f_samples.shape != eta_samples.shape:
@@ -246,7 +236,7 @@ class SubsetSelect(Algorithm):
                 samples = f_samples * eta_samples
 
             elif self.noise_type == 'additive':
-                noise_posterior = self.noise_gp.posterior(S)
+                noise_posterior = f.noise_gp.posterior(S)
                 # Sample from the noise_posterior using SobolQMCNormalSampler
                 eta_samples = sampler(noise_posterior)
 
@@ -260,6 +250,7 @@ class SubsetSelect(Algorithm):
 
             max_values = samples.max(dim=1)[0]
             expected_max = max_values.mean(dim=0)
+            print("monte carlo done")
         return expected_max
 
     def select_next(self, f: BaseGPModel):
@@ -268,6 +259,7 @@ class SubsetSelect(Algorithm):
 
         :return: Point from X that is estimated to maximize the expectation.
         """
+        print("select next")
         # mask creation
         mask = torch.tensor(
             [not any(torch.allclose(x.float(), torch.tensor(selected).float().to(self.device)) for selected in self.selected_subset) for x in self.X],
@@ -292,6 +284,7 @@ class SubsetSelect(Algorithm):
         :param f: Not used in this method but retained for compatibility.
         :return: Next selected point or None if selection is complete.
         """
+        print("take step")
         next_x = self.select_next(f)
 
         if len(self.selected_subset) < self.k:
